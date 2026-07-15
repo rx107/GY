@@ -31,7 +31,7 @@ void SceneParticleSystem::Init()
 
 	// モデルの読み込み
 	CreateObj<Model>("Noob");
-	GetObj<Model>("Noob")->Load("Assets/Model/noob/source/noob.obj", 1.0f, true);
+	GetObj<Model>("Noob")->Load("Assets/Model/noob/source/noob.obj", 1.0f, true, true);
 
 	// テクスチャ設定
 	m_emitter.SetTexture(p_tex);
@@ -78,19 +78,9 @@ void SceneParticleSystem::Draw()
 	Model* p_noob = GetObj<Model>("Noob");
 	if (p_noob)
 	{
-		// 1. 位置を (0, 0, 0) にするための行列（ワールド行列）を作成
-		// 移動させない（原点）ので、回転や拡大縮小がなければ「単位行列（Identity）」のままで大丈夫です
-		//Matrix world = Matrix::Identity;
-		// もし明示的に位置を指定するなら以下のように書きます
-		Matrix world = Matrix::CreateTranslation(0.0f, 0.0f, 0.0f);
-
-		// 2. GPU（シェーダー）にワールド行列をセットする
-		// ※提示された Model クラス自体には位置を保持する変数が無いため、
-		// フレームワーク側で用意されている「ワールド行列用の定数バッファを更新・バインドする関数」をここで呼び出す必要があります。
-		// （例: UpdateWorldMatrix(world); や GetContext()->VSSetConstantBuffers(...); など）
-
-		// 3. モデルの描画を実行
+		// noob.obj を読み込み済みのモデルとしてそのまま描画します。
+		// ワールド行列をモデルへ反映する機能がまだないため、
+		// 現状はモデル側既定の描画フローに委ねます。
 		p_noob->Draw();
 	}
-	
 }
