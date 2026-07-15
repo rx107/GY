@@ -78,9 +78,43 @@ void SceneParticleSystem::Draw()
 	Model* p_noob = GetObj<Model>("Noob");
 	if (p_noob)
 	{
-		// noob.obj を読み込み済みのモデルとしてそのまま描画します。
-		// ワールド行列をモデルへ反映する機能がまだないため、
-		// 現状はモデル側既定の描画フローに委ねます。
-		p_noob->Draw();
+		// Model::Draw() はカメラ/ライト/ワールド行列を外から受け取る構造ではないので、
+		// 既存の SceneVisual / SceneAnimation と同じく描画前に各定数バッファを準備します。
+		CameraBase* pCamera = GetObj<CameraBase>("Camera");
+		LightBase* pLight = GetObj<LightBase>("Light");
+		if (pCamera && pLight)
+		{
+			DirectX::XMFLOAT4X4 mat[3];
+			DirectX::XMStoreFloat4x4(&mat[0], DirectX::XMMatrixTranspose(
+				DirectX::XMMatrixScaling(1.0f, 1.0f, 1.0f) *
+				DirectX::XMMatrixTranslation(0.0f, 0.0f, 0.0f)
+			));
+			mat[1] = pCamera->GetView();
+			mat[2] = pCamera->GetProj();
+
+			DirectX::XMFLOAT3 lightDir = pLight->GetDirection();
+			DirectX::XMFLOAT4 light[] = {
+				pLight->GetDiffuse(),
+				pLight->GetAmbient(),
+				{lightDir.x, lightDir.y, lightDir.z, 0.0f}
+			};
+
+			Shader* shader[] = {
+				GetObj<Shader>("VS_Object"),
+				GetObj<Shader>("PS_TexColor"),
+			};
+
+			if (shader[0] && shader[1])
+			{
+				shader[0]->WriteBuffer(0, mat);
+				shader[0]->WriteBuffer(1, light);
+				shader[1]->WriteBuffer(0, light);
+				shader[1]->WriteBuffer(1, &pCamera->GetPos());
+
+				p_noob->SetVertexShader(shader[0]);
+				p_noob->SetPixelShader(shader[1]);
+				p_noob->Draw();
+			}
+		}
 	}
 }
