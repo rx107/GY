@@ -103,6 +103,8 @@ public:
 	SimpleMath::Matrix GetScaleBaseMatrix();
 	float GetScaleBase();
 private:
+	bool LoadObj(const char* file, bool flip);
+	void ResetModelData();
 	void MakeDefaultShader();
 	bool CreateConstantBufferWrite(
 		ID3D11Device* device,					// デバイスオブジェクト

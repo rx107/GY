@@ -3,6 +3,12 @@
 #include "DebugLog.h"
 
 #include <assimp/postprocess.h>
+#include <algorithm>
+#include <array>
+#include <cctype>
+#include <fstream>
+#include <sstream>
+#include <unordered_map>
 
 #if _MSC_VER >= 1920
 #ifdef _DEBUG
@@ -19,6 +25,91 @@
 std::shared_ptr<VertexShader> Model::m_defVS = nullptr;
 std::shared_ptr<PixelShader> Model::m_defPS = nullptr;
 
+namespace
+{
+	struct ObjFaceIndex
+	{
+		int pos = 0;
+		int uv = 0;
+		int normal = 0;
+
+		bool operator==(const ObjFaceIndex& rhs) const
+		{
+			return pos == rhs.pos && uv == rhs.uv && normal == rhs.normal;
+		}
+	};
+
+	struct ObjFaceIndexHash
+	{
+		size_t operator()(const ObjFaceIndex& data) const
+		{
+			size_t value = static_cast<size_t>(data.pos);
+			value ^= static_cast<size_t>(data.uv) << 10;
+			value ^= static_cast<size_t>(data.normal) << 20;
+			return value;
+		}
+	};
+
+	bool ParseObjFaceToken(const std::string& token, ObjFaceIndex& out)
+	{
+		size_t firstSlash = token.find('/');
+		if (firstSlash == std::string::npos)
+		{
+			try
+			{
+				out.pos = std::stoi(token);
+				return true;
+			}
+			catch (...)
+			{
+				return false;
+			}
+		}
+
+		size_t secondSlash = token.find('/', firstSlash + 1);
+		const std::string posToken = token.substr(0, firstSlash);
+		const std::string uvToken = secondSlash == std::string::npos
+			? token.substr(firstSlash + 1)
+			: token.substr(firstSlash + 1, secondSlash - firstSlash - 1);
+		const std::string normalToken = secondSlash == std::string::npos
+			? std::string()
+			: token.substr(secondSlash + 1);
+
+		try
+		{
+			if (!posToken.empty()) out.pos = std::stoi(posToken);
+			if (!uvToken.empty()) out.uv = std::stoi(uvToken);
+			if (!normalToken.empty()) out.normal = std::stoi(normalToken);
+		}
+		catch (...)
+		{
+			return false;
+		}
+		return out.pos != 0;
+	}
+
+	int ResolveObjIndex(int idx, size_t count)
+	{
+		if (idx > 0) return idx - 1;
+		if (idx < 0) return static_cast<int>(count) + idx;
+		return -1;
+	}
+
+	std::string ToLowerExt(const char* file)
+	{
+		std::string ext;
+		if (!file) return ext;
+		ext = file;
+		size_t dot = ext.find_last_of('.');
+		if (dot == std::string::npos) return std::string();
+		ext = ext.substr(dot);
+		std::transform(ext.begin(), ext.end(), ext.begin(), [](unsigned char c) {
+			return static_cast<char>(std::tolower(c));
+			});
+		return ext;
+	}
+}
+
 Model::Model()
 	: m_pVS(nullptr)
 	, m_pPS(nullptr)
@@ -32,7 +123,22 @@ Model::Model()
 	importer = new Assimp::Importer();
 }
 Model::~Model() {
+	for (auto& animation : m_Animation)
+	{
+		aiReleaseImport(animation.second);
+	}
+	m_Animation.clear();
+	SAFE_RELEASE(m_BoneCombMtxCBuffer);
+	delete importer;
+	importer = nullptr;
+}
 
+void Model::ResetModelData()
+{
+	m_meshes.clear();
+	m_materials.clear();
+	m_Bone.clear();
+	SAFE_RELEASE(m_BoneCombMtxCBuffer);
 }
 
 void Model::SetVertexShader(Shader* vs)
@@ -64,9 +170,24 @@ uint32_t Model::GetMeshNum() const
 
 bool Model::Load(const char* file, float scaleBase, bool flip, bool simpleMode)
 {
+	if (!file || file[0] == '\0')
+	{
+		Error("モデルファイルのパスが不正です");
+		return false;
+	}
+
 	DebugLog::log(DebugLog::INFO_LOG, "モデル読み込み開始");
 	DebugLog::log(DebugLog::INFO_LOG, "path ", file);
 	m_scaleBase = scaleBase;
+	ResetModelData();
+
+	// OBJは軽量ローダーを優先し、失敗時はAssimpで再試行する
+	if (ToLowerExt(file) == ".obj" && LoadObj(file, flip))
+	{
+		DebugLog::log(DebugLog::INFO_LOG, "OBJローダーで読み込み完了");
+		return true;
+	}
+	ResetModelData();
 
 	int flag = 0;
 	if (simpleMode)
@@ -263,6 +384,177 @@ bool Model::Load(const char* file, float scaleBase, bool flip, bool simpleMode)
 
 	DebugLog::log(DebugLog::INFO_LOG, "モデル読み込み完了");
 	return true;
+}
+
+bool Model::LoadObj(const char* file, bool flip)
+{
+	std::ifstream ifs(file);
+	if (!ifs)
+	{
+		DebugLog::log(DebugLog::WARNING_LOG, "OBJ読み込み失敗（ファイルオープン不可）", file);
+		return false;
+	}
+
+	std::vector<DirectX::XMFLOAT3> positions;
+	std::vector<DirectX::XMFLOAT3> normals;
+	std::vector<DirectX::XMFLOAT2> uvs;
+	std::vector<Vertex> vertices;
+	std::vector<unsigned int> indices;
+	std::unordered_map<ObjFaceIndex, unsigned int, ObjFaceIndexHash> vertexCache;
+
+	auto appendIndex = [&](const ObjFaceIndex& faceIndex) -> unsigned int
+	{
+		auto it = vertexCache.find(faceIndex);
+		if (it != vertexCache.end())
+		{
+			return it->second;
+		}
+
+		int posIndex = ResolveObjIndex(faceIndex.pos, positions.size());
+		if (posIndex < 0 || static_cast<size_t>(posIndex) >= positions.size())
+		{
+			return static_cast<unsigned int>(-1);
+		}
+		int uvIndex = ResolveObjIndex(faceIndex.uv, uvs.size());
+		int normalIndex = ResolveObjIndex(faceIndex.normal, normals.size());
+
+		const DirectX::XMFLOAT3& pos = positions[posIndex];
+		DirectX::XMFLOAT3 normal(0.0f, 0.0f, 0.0f);
+		DirectX::XMFLOAT2 uv(0.0f, 0.0f);
+		if (normalIndex >= 0 && static_cast<size_t>(normalIndex) < normals.size())
+		{
+			normal = normals[normalIndex];
+		}
+		if (uvIndex >= 0 && static_cast<size_t>(uvIndex) < uvs.size())
+		{
+			uv = uvs[uvIndex];
+		}
+
+		Vertex vertex = {
+			DirectX::XMFLOAT3(pos.x, pos.y, flip ? -pos.z : pos.z),
+			DirectX::XMFLOAT3(normal.x, normal.y, flip ? -normal.z : normal.z),
+			uv,
+			{-1,-1,-1,-1},
+			{0.0f,0.0f,0.0f,0.0f}
+		};
+		vertices.push_back(vertex);
+		unsigned int newIndex = static_cast<unsigned int>(vertices.size() - 1);
+		vertexCache.emplace(faceIndex, newIndex);
+		return newIndex;
+		};
+
+	std::string line;
+	while (std::getline(ifs, line))
+	{
+		if (size_t hashPos = line.find('#'); hashPos != std::string::npos)
+		{
+			line.erase(hashPos);
+		}
+		std::istringstream stream(line);
+		std::string tag;
+		stream >> tag;
+		if (tag.empty()) continue;
+
+		if (tag == "v")
+		{
+			float x, y, z;
+			if (stream >> x >> y >> z)
+			{
+				positions.emplace_back(x, y, z);
+			}
+		}
+		else if (tag == "vn")
+		{
+			float x, y, z;
+			if (stream >> x >> y >> z)
+			{
+				normals.emplace_back(x, y, z);
+			}
+		}
+		else if (tag == "vt")
+		{
+			float u, v;
+			if (stream >> u >> v)
+			{
+				uvs.emplace_back(u, v);
+			}
+		}
+		else if (tag == "f")
+		{
+			std::vector<ObjFaceIndex> face;
+			std::string token;
+			while (stream >> token)
+			{
+				ObjFaceIndex parsed;
+				if (!ParseObjFaceToken(token, parsed))
+				{
+					return false;
+				}
+				face.push_back(parsed);
+			}
+			if (face.size() < 3)
+			{
+				continue;
+			}
+			for (size_t i = 1; i + 1 < face.size(); ++i)
+			{
+				unsigned int i0 = appendIndex(face[0]);
+				unsigned int i1 = appendIndex(face[i]);
+				unsigned int i2 = appendIndex(face[i + 1]);
+				if (i0 == static_cast<unsigned int>(-1) ||
+					i1 == static_cast<unsigned int>(-1) ||
+					i2 == static_cast<unsigned int>(-1))
+				{
+					return false;
+				}
+				if (flip)
+				{
+					indices.push_back(i0);
+					indices.push_back(i2);
+					indices.push_back(i1);
+				}
+				else
+				{
+					indices.push_back(i0);
+					indices.push_back(i1);
+					indices.push_back(i2);
+				}
+			}
+		}
+	}
+
+	if (vertices.empty() || indices.empty())
+	{
+		return false;
+	}
+
+	Mesh mesh = {};
+	mesh.materialID = 0;
+	MeshBuffer::Description desc = {};
+	desc.pVtx = vertices.data();
+	desc.vtxSize = sizeof(Vertex);
+	desc.vtxCount = static_cast<UINT>(vertices.size());
+	desc.isWrite = false;
+	desc.pIdx = indices.data();
+	desc.idxSize = sizeof(unsigned int);
+	desc.idxCount = static_cast<UINT>(indices.size());
+	desc.topology = D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST;
+	mesh.mesh = std::make_shared<MeshBuffer>(desc);
+	m_meshes.push_back(mesh);
+
+	Material material = {};
+	material.diffuse = DirectX::XMFLOAT4(1.0f, 1.0f, 1.0f, 1.0f);
+	material.ambient = DirectX::XMFLOAT4(0.3f, 0.3f, 0.3f, 1.0f);
+	material.specular = DirectX::XMFLOAT4(0.0f, 0.0f, 0.0f, 0.0f);
+	material.texture = nullptr;
+	m_materials.push_back(material);
+
+	CreateConstantBufferWrite(
+		GetDevice(),
+		sizeof(CBBoneCombMatrix),
+		&m_BoneCombMtxCBuffer);
+
+	return m_BoneCombMtxCBuffer != nullptr;
 }
 
 
