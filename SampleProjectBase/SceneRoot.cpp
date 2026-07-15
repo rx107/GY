@@ -122,7 +122,7 @@ void SceneRoot::Init()
 		pAnimModel->LoadAnimation("Assets/Model/Akai/Akai_Walk.fbx", "Walk", true);
 	}*/
 	Model* pPlane = CreateObj<Model>("ModelPlane");
-	pPlane->Load("Assets/Model/plane/plane.fbx");
+	pPlane->Load("Assets/Model/plane/plane.obj", 1.0f, false, true);
 
 	Model* pField = CreateObj<Model>("FieldModel");
 	pField->Load("Assets/Model/field/field.fbx", 1.0f, false, true);

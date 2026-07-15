@@ -76,6 +76,7 @@ StyleCopReport.xml
 *.ilk
 *.meta
 *.obj
+!SampleProjectBase/Assets/Model/plane/plane.obj
 *.iobj
 *.pch
 *.pdb
